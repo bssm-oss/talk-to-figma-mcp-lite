@@ -5,3 +5,7 @@ dist/
 tmp/
 docs/*
 !docs/PRD.md
+!docs/lite-tool-flow.md
+!docs/original-mcp-tools.md
+!docs/setup-local-dev.md
+!docs/lineage-license.md
