@@ -5,6 +5,25 @@ import { Server, ServerWebSocket } from "bun";
 // Store clients by channel
 const channels = new Map<string, Set<ServerWebSocket<any>>>();
 
+function describeMessage(data: unknown): string {
+  if (!data || typeof data !== "object") {
+    return `type=${typeof data}`;
+  }
+
+  const record = data as Record<string, unknown>;
+  const message = record.message && typeof record.message === "object" ? record.message as Record<string, unknown> : undefined;
+
+  return [
+    `id=${typeof record.id === "string" ? record.id : typeof message?.id === "string" ? message.id : "n/a"}`,
+    `type=${typeof record.type === "string" ? record.type : "n/a"}`,
+    `channel=${typeof record.channel === "string" ? record.channel : "n/a"}`,
+    `command=${typeof message?.command === "string" ? message.command : "n/a"}`,
+    `hasParams=${Boolean(message?.params)}`,
+    `hasResult=${Boolean(message && "result" in message)}`,
+    `hasError=${Boolean(message && "error" in message)}`,
+  ].join(", ");
+}
+
 function handleConnection(ws: ServerWebSocket<any>) {
   // Don't add to clients immediately - wait for channel join
   console.log("New client connected");
@@ -78,13 +97,7 @@ const server = Bun.serve({
       try {
         const data = JSON.parse(message as string);
         console.log(`\n=== Received message from client ===`);
-        console.log(`Type: ${data.type}, Channel: ${data.channel || 'N/A'}`);
-        if (data.message?.command) {
-          console.log(`Command: ${data.message.command}, ID: ${data.id}`);
-        } else if (data.message?.result) {
-          console.log(`Response: ID: ${data.id}, Has Result: ${!!data.message.result}`);
-        }
-        console.log(`Full message:`, JSON.stringify(data, null, 2));
+        console.log(`Metadata: ${describeMessage(data)}`);
 
         if (data.type === "join") {
           const channelName = data.channel;
@@ -169,7 +182,7 @@ const server = Bun.serve({
                 channel: channelName
               };
               console.log(`\n=== Broadcasting to peer #${broadcastCount} ===`);
-              console.log(JSON.stringify(broadcastMessage, null, 2));
+              console.log(`Metadata: ${describeMessage(broadcastMessage)}`);
               client.send(JSON.stringify(broadcastMessage));
             }
           });

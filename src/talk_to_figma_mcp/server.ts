@@ -5,6 +5,26 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import WebSocket from "ws";
 import { v4 as uuidv4 } from "uuid";
+import {
+  extractNodeId,
+  liteCreateNodesResult,
+  liteErrorFromUnknown,
+  liteFail,
+  liteOk,
+  liteTextResponse,
+  planCreateNode,
+  planInspectDesign,
+  planManageText,
+  planUpdateNodes,
+  planViewAndExport,
+  type CreateNodesInput,
+  type InspectDesignInput,
+  type LiteDispatch,
+  type LiteToolResponse,
+  type ManageTextInput,
+  type UpdateNodesInput,
+  type ViewAndExportInput,
+} from "./lite";
 
 // Define TypeScript interfaces for Figma responses
 interface FigmaResponse {
@@ -61,6 +81,26 @@ const logger = {
   log: (message: string) => process.stderr.write(`[LOG] ${message}\n`)
 };
 
+function describePayload(value: unknown): string {
+  if (!value || typeof value !== "object") {
+    return `type=${typeof value}`;
+  }
+
+  const record = value as Record<string, unknown>;
+  const message = record.message && typeof record.message === "object" ? record.message as Record<string, unknown> : undefined;
+  const params = message?.params && typeof message.params === "object" ? message.params as Record<string, unknown> : undefined;
+
+  return [
+    `id=${typeof record.id === "string" ? record.id : typeof message?.id === "string" ? message.id : "n/a"}`,
+    `type=${typeof record.type === "string" ? record.type : "n/a"}`,
+    `channel=${typeof record.channel === "string" ? record.channel : "n/a"}`,
+    `command=${typeof message?.command === "string" ? message.command : "n/a"}`,
+    `hasParams=${Boolean(params)}`,
+    `hasResult=${"result" in record || Boolean(message && "result" in message)}`,
+    `hasError=${"error" in record || Boolean(message && "error" in message)}`,
+  ].join(", ");
+}
+
 // WebSocket connection and request tracking
 let ws: WebSocket | null = null;
 const pendingRequests = new Map<string, {
@@ -72,6 +112,7 @@ const pendingRequests = new Map<string, {
 
 // Track which channel each client is in
 let currentChannel: string | null = null;
+let desiredChannel: string | null = null;
 
 // Create MCP server
 const server = new McpServer({
@@ -84,6 +125,391 @@ const args = process.argv.slice(2);
 const serverArg = args.find(arg => arg.startsWith('--server='));
 const serverUrl = serverArg ? serverArg.split('=')[1] : 'localhost';
 const WS_URL = serverUrl === 'localhost' ? `ws://${serverUrl}` : `wss://${serverUrl}`;
+
+const DEFAULT_FIGMA_PORT = 3055;
+
+const liteSessionSchema = {
+  action: z.enum(["status", "join", "reconnect"]),
+  channel: z.string().optional(),
+};
+
+const inspectTargetSchema = z.union([
+  z.object({ kind: z.literal("document") }),
+  z.object({ kind: z.literal("selection") }),
+  z.object({ kind: z.literal("nodes"), nodeIds: z.array(z.string()) }),
+  z.object({ kind: z.literal("subtree"), nodeId: z.string() }),
+  z.object({ kind: z.literal("assets") }),
+]);
+
+const inspectDesignSchema = {
+  target: inspectTargetSchema.optional(),
+  detail: z.enum(["summary", "structure", "full", "text", "types"]).optional(),
+  types: z.array(z.string()).optional(),
+  maxDepth: z.number().optional(),
+  chunkSize: z.number().int().min(1).max(100).optional(),
+};
+
+const rgbaSchema = z.object({
+  r: z.number().min(0).max(1),
+  g: z.number().min(0).max(1),
+  b: z.number().min(0).max(1),
+  a: z.number().min(0).max(1).optional(),
+});
+
+const createNodeSchema = z.union([
+  z.object({
+    kind: z.literal("frame"),
+    name: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    width: z.number().positive(),
+    height: z.number().positive(),
+    fillColor: rgbaSchema.optional(),
+    strokeColor: rgbaSchema.optional(),
+    strokeWeight: z.number().positive().optional(),
+    layoutMode: z.enum(["NONE", "HORIZONTAL", "VERTICAL"]).optional(),
+    layoutWrap: z.enum(["NO_WRAP", "WRAP"]).optional(),
+    paddingTop: z.number().min(0).optional(),
+    paddingRight: z.number().min(0).optional(),
+    paddingBottom: z.number().min(0).optional(),
+    paddingLeft: z.number().min(0).optional(),
+    primaryAxisAlignItems: z.enum(["MIN", "MAX", "CENTER", "SPACE_BETWEEN"]).optional(),
+    counterAxisAlignItems: z.enum(["MIN", "MAX", "CENTER", "BASELINE"]).optional(),
+    layoutSizingHorizontal: z.enum(["FIXED", "HUG", "FILL"]).optional(),
+    layoutSizingVertical: z.enum(["FIXED", "HUG", "FILL"]).optional(),
+    itemSpacing: z.number().min(0).optional(),
+  }),
+  z.object({
+    kind: z.literal("rectangle"),
+    name: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    width: z.number().positive(),
+    height: z.number().positive(),
+  }),
+  z.object({
+    kind: z.literal("text"),
+    name: z.string().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    text: z.string(),
+    fontSize: z.number().positive().optional(),
+    fontWeight: z.number().optional(),
+    fontColor: rgbaSchema.optional(),
+  }),
+]);
+
+const createNodesSchema = {
+  parentId: z.string().optional(),
+  nodes: z.array(createNodeSchema).min(1),
+  selectCreated: z.boolean().optional(),
+};
+
+const stylePatchSchema = z.object({
+  fill: rgbaSchema.optional(),
+  stroke: z.object({ color: rgbaSchema, weight: z.number().positive().optional() }).optional(),
+  cornerRadius: z.object({
+    radius: z.number().min(0),
+    corners: z.tuple([z.boolean(), z.boolean(), z.boolean(), z.boolean()]).optional(),
+  }).optional(),
+});
+
+const layoutPatchSchema = z.object({
+  mode: z.enum(["NONE", "HORIZONTAL", "VERTICAL"]).optional(),
+  wrap: z.enum(["NO_WRAP", "WRAP"]).optional(),
+  padding: z.object({
+    top: z.number().min(0).optional(),
+    right: z.number().min(0).optional(),
+    bottom: z.number().min(0).optional(),
+    left: z.number().min(0).optional(),
+  }).optional(),
+  align: z.object({
+    primary: z.enum(["MIN", "MAX", "CENTER", "SPACE_BETWEEN"]).optional(),
+    counter: z.enum(["MIN", "MAX", "CENTER", "BASELINE"]).optional(),
+  }).optional(),
+  sizing: z.object({
+    horizontal: z.enum(["FIXED", "HUG", "FILL"]).optional(),
+    vertical: z.enum(["FIXED", "HUG", "FILL"]).optional(),
+  }).optional(),
+  spacing: z.object({
+    item: z.number().min(0).optional(),
+    counterAxis: z.number().min(0).optional(),
+  }).optional(),
+});
+
+const updateNodesSchema = {
+  mode: z.enum(["preview", "apply"]),
+  confirmDestructive: z.boolean().optional(),
+  patches: z.array(z.object({
+    nodeId: z.string(),
+    rename: z.string().optional(),
+    geometry: z.object({
+      x: z.number().optional(),
+      y: z.number().optional(),
+      width: z.number().positive().optional(),
+      height: z.number().positive().optional(),
+    }).optional(),
+    style: stylePatchSchema.optional(),
+    layout: layoutPatchSchema.optional(),
+    text: z.object({ characters: z.string(), preserveStyle: z.boolean().optional() }).optional(),
+    clone: z.object({ x: z.number().optional(), y: z.number().optional() }).optional(),
+    delete: z.boolean().optional(),
+  })).min(1),
+};
+
+const manageTextSchema = {
+  action: z.enum(["scan", "replace"]),
+  scope: z.object({ nodeId: z.string().optional(), selection: z.boolean().optional() }),
+  replacements: z.array(z.object({ nodeId: z.string(), text: z.string() })).optional(),
+  preserveStyle: z.boolean().optional(),
+  mode: z.enum(["preview", "apply"]).optional(),
+  chunkSize: z.number().int().min(1).max(100).optional(),
+};
+
+const viewAndExportSchema = {
+  action: z.enum(["focus", "select", "export"]),
+  nodeIds: z.array(z.string()).optional(),
+  nodeId: z.string().optional(),
+  export: z.object({
+    format: z.literal("PNG").optional(),
+    scale: z.number().positive().max(10).optional(),
+  }).optional(),
+};
+
+function getSocketState() {
+  if (!ws) {
+    return "disconnected";
+  }
+
+  if (ws.readyState === WebSocket.CONNECTING) {
+    return "connecting";
+  }
+
+  if (ws.readyState === WebSocket.OPEN) {
+    return "connected";
+  }
+
+  if (ws.readyState === WebSocket.CLOSING) {
+    return "disconnecting";
+  }
+
+  return "disconnected";
+}
+
+function isLiteDispatch(plan: LiteDispatch | LiteToolResponse<unknown>): plan is LiteDispatch {
+  return "command" in plan;
+}
+
+server.tool(
+  "figma_session",
+  "Lite session management for Figma relay status, channel join, and reconnect attempts",
+  liteSessionSchema,
+  async ({ action, channel }) => {
+    try {
+      if (action === "status") {
+        return liteTextResponse(liteOk({
+          wsState: getSocketState(),
+          currentChannel,
+          desiredChannel,
+          pendingRequestCount: pendingRequests.size,
+          serverUrl,
+          port: DEFAULT_FIGMA_PORT,
+          peerCount: null,
+        }, {
+          warnings: [{
+            code: "PEER_COUNT_UNAVAILABLE",
+            message: "Relay peer count is not implemented in this first Lite slice.",
+          }],
+        }));
+      }
+
+      if (action === "reconnect") {
+        connectToFigma(DEFAULT_FIGMA_PORT);
+        return liteTextResponse(liteOk({
+          wsState: getSocketState(),
+          currentChannel,
+          desiredChannel,
+          pendingRequestCount: pendingRequests.size,
+        }));
+      }
+
+      if (!channel) {
+        return liteTextResponse(liteFail(
+          "CHANNEL_REQUIRED",
+          "figma_session join requires a channel value",
+          true,
+          "Copy the channel from the Figma plugin UI and call figma_session({ action: 'join', channel }).",
+        ));
+      }
+
+      await joinChannel(channel);
+      return liteTextResponse(liteOk({
+        wsState: getSocketState(),
+        currentChannel,
+        desiredChannel,
+        pendingRequestCount: pendingRequests.size,
+      }));
+    } catch (error) {
+      return liteTextResponse(liteErrorFromUnknown(error, "Check that the relay and Figma plugin are running, then retry."));
+    }
+  },
+);
+
+server.tool(
+  "inspect_design",
+  "Lite design inspection facade that routes document, selection, node, text, and type reads through existing plugin commands",
+  inspectDesignSchema,
+  async (input: InspectDesignInput) => {
+    try {
+      const plan = planInspectDesign(input);
+      if (!isLiteDispatch(plan)) {
+        return liteTextResponse(plan);
+      }
+
+      const result = await sendCommandToFigma(plan.command, plan.params ?? {});
+      return liteTextResponse(liteOk(result));
+    } catch (error) {
+      return liteTextResponse(liteErrorFromUnknown(error, "Join a Figma channel first, then retry inspect_design."));
+    }
+  },
+);
+
+server.tool(
+  "update_nodes",
+  "Lite update facade for geometry, style, layout, text, clone, and guarded delete patches",
+  updateNodesSchema,
+  async (input: UpdateNodesInput) => {
+    try {
+      const plan = planUpdateNodes(input);
+      if (!("patches" in plan)) {
+        return liteTextResponse(plan);
+      }
+
+      const affectedNodeIds = plan.patches.map((patch) => patch.nodeId);
+      if (input.mode === "preview") {
+        return liteTextResponse(liteOk({ planned: plan.patches }, { affectedNodeIds }));
+      }
+
+      const applied: unknown[] = [];
+      const warnings: Array<{ code: string; message: string; nodeId?: string }> = [];
+
+      for (const patch of plan.patches) {
+        for (const dispatch of patch.dispatches) {
+          try {
+            const result = await sendCommandToFigma(dispatch.command, dispatch.params ?? {});
+            applied.push({ nodeId: patch.nodeId, command: dispatch.command, result });
+          } catch (error) {
+            warnings.push({
+              code: "FIGMA_COMMAND_FAILED",
+              nodeId: patch.nodeId,
+              message: `${dispatch.command} failed: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          }
+        }
+      }
+
+      if (applied.length === 0 && warnings.length > 0) {
+        return liteTextResponse({
+          ...liteFail(
+            "FIGMA_COMMAND_FAILED",
+            "All update_nodes operations failed",
+            true,
+            "Check the Figma connection, joined channel, node ids, and patch values, then retry.",
+          ),
+          warnings,
+          affectedNodeIds,
+        });
+      }
+
+      return liteTextResponse(liteOk({ applied }, { warnings, affectedNodeIds }));
+    } catch (error) {
+      return liteTextResponse(liteErrorFromUnknown(error, "Join a Figma channel first, then retry update_nodes."));
+    }
+  },
+);
+
+server.tool(
+  "manage_text",
+  "Lite text workflow facade for scanning and preview/apply batch replacement",
+  manageTextSchema,
+  async (input: ManageTextInput) => {
+    try {
+      const plan = planManageText(input);
+      if (!isLiteDispatch(plan)) {
+        return liteTextResponse(plan);
+      }
+
+      const result = await sendCommandToFigma(plan.command, plan.params ?? {});
+      const affectedNodeIds = input.replacements?.map((item) => item.nodeId);
+      return liteTextResponse(liteOk(result, { affectedNodeIds }));
+    } catch (error) {
+      return liteTextResponse(liteErrorFromUnknown(error, "Join a Figma channel first, then retry manage_text."));
+    }
+  },
+);
+
+server.tool(
+  "view_and_export",
+  "Lite viewport and export facade for focus, select, and node image export",
+  viewAndExportSchema,
+  async (input: ViewAndExportInput) => {
+    try {
+      const plan = planViewAndExport(input);
+      if (!isLiteDispatch(plan)) {
+        return liteTextResponse(plan);
+      }
+
+      const result = await sendCommandToFigma(plan.command, plan.params ?? {});
+      const affectedNodeIds = input.nodeIds ?? (input.nodeId ? [input.nodeId] : undefined);
+      return liteTextResponse(liteOk(result, { affectedNodeIds }));
+    } catch (error) {
+      return liteTextResponse(liteErrorFromUnknown(error, "Join a Figma channel first, then retry view_and_export."));
+    }
+  },
+);
+
+server.tool(
+  "create_nodes",
+  "Lite node creation facade for frames, rectangles, and text nodes",
+  createNodesSchema,
+  async (input: CreateNodesInput) => {
+    const created: unknown[] = [];
+    const warnings: Array<{ code: string; message: string; nodeId?: string }> = [];
+    const affectedNodeIds: string[] = [];
+
+    for (let index = 0; index < input.nodes.length; index += 1) {
+      const node = input.nodes[index];
+      try {
+        const dispatch = planCreateNode(node, input.parentId);
+        const result = await sendCommandToFigma(dispatch.command, dispatch.params ?? {});
+        created.push({ index, kind: node.kind, result });
+
+        const nodeId = extractNodeId(result);
+        if (nodeId) {
+          affectedNodeIds.push(nodeId);
+        }
+      } catch (error) {
+        warnings.push({
+          code: "FIGMA_COMMAND_FAILED",
+          message: `Node ${index} (${node.kind}) failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    if (input.selectCreated && affectedNodeIds.length > 0) {
+      try {
+        await sendCommandToFigma("set_selections", { nodeIds: affectedNodeIds });
+      } catch (error) {
+        warnings.push({
+          code: "SELECTION_FAILED",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return liteTextResponse(liteCreateNodesResult(created, warnings, affectedNodeIds));
+  },
+);
 
 // Document Info Tool
 server.tool(
@@ -440,10 +866,10 @@ server.tool(
     strokeWeight: z.number().positive().optional().describe("Stroke weight"),
     layoutMode: z.enum(["NONE", "HORIZONTAL", "VERTICAL"]).optional().describe("Auto-layout mode for the frame"),
     layoutWrap: z.enum(["NO_WRAP", "WRAP"]).optional().describe("Whether the auto-layout frame wraps its children"),
-    paddingTop: z.number().optional().describe("Top padding for auto-layout frame"),
-    paddingRight: z.number().optional().describe("Right padding for auto-layout frame"),
-    paddingBottom: z.number().optional().describe("Bottom padding for auto-layout frame"),
-    paddingLeft: z.number().optional().describe("Left padding for auto-layout frame"),
+    paddingTop: z.number().min(0).optional().describe("Top padding for auto-layout frame"),
+    paddingRight: z.number().min(0).optional().describe("Right padding for auto-layout frame"),
+    paddingBottom: z.number().min(0).optional().describe("Bottom padding for auto-layout frame"),
+    paddingLeft: z.number().min(0).optional().describe("Left padding for auto-layout frame"),
     primaryAxisAlignItems: z
       .enum(["MIN", "MAX", "CENTER", "SPACE_BETWEEN"])
       .optional()
@@ -453,6 +879,7 @@ server.tool(
     layoutSizingVertical: z.enum(["FIXED", "HUG", "FILL"]).optional().describe("Vertical sizing mode for auto-layout frame"),
     itemSpacing: z
       .number()
+      .min(0)
       .optional()
       .describe("Distance between children in auto-layout frame. Note: This value will be ignored if primaryAxisAlignItems is set to SPACE_BETWEEN.")
   },
@@ -793,9 +1220,20 @@ server.tool(
   "Delete a node from Figma",
   {
     nodeId: z.string().describe("The ID of the node to delete"),
+    confirmDestructive: z.boolean().optional().describe("Must be true to confirm destructive deletion"),
   },
-  async ({ nodeId }: any) => {
+  async ({ nodeId, confirmDestructive }: any) => {
     try {
+      if (confirmDestructive !== true) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "delete_node requires confirmDestructive: true",
+            },
+          ],
+        };
+      }
       await sendCommandToFigma("delete_node", { nodeId });
       return {
         content: [
@@ -825,9 +1263,20 @@ server.tool(
   "Delete multiple nodes from Figma at once",
   {
     nodeIds: z.array(z.string()).describe("Array of node IDs to delete"),
+    confirmDestructive: z.boolean().optional().describe("Must be true to confirm destructive deletion"),
   },
-  async ({ nodeIds }: any) => {
+  async ({ nodeIds, confirmDestructive }: any) => {
     try {
+      if (confirmDestructive !== true) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "delete_multiple_nodes requires confirmDestructive: true",
+            },
+          ],
+        };
+      }
       const result = await sendCommandToFigma("delete_multiple_nodes", { nodeIds });
       return {
         content: [
@@ -858,7 +1307,7 @@ server.tool(
   {
     nodeId: z.string().describe("The ID of the node to export"),
     format: z
-      .enum(["PNG", "JPG", "SVG", "PDF"])
+      .literal("PNG")
       .optional()
       .describe("Export format"),
     scale: z.number().positive().optional().describe("Export scale"),
@@ -2140,10 +2589,10 @@ server.tool(
   "Set padding values for an auto-layout frame in Figma",
   {
     nodeId: z.string().describe("The ID of the frame to modify"),
-    paddingTop: z.number().optional().describe("Top padding value"),
-    paddingRight: z.number().optional().describe("Right padding value"),
-    paddingBottom: z.number().optional().describe("Bottom padding value"),
-    paddingLeft: z.number().optional().describe("Left padding value"),
+    paddingTop: z.number().min(0).optional().describe("Top padding value"),
+    paddingRight: z.number().min(0).optional().describe("Right padding value"),
+    paddingBottom: z.number().min(0).optional().describe("Bottom padding value"),
+    paddingLeft: z.number().min(0).optional().describe("Left padding value"),
   },
   async ({ nodeId, paddingTop, paddingRight, paddingBottom, paddingLeft }: any) => {
     try {
@@ -2302,8 +2751,8 @@ server.tool(
   "Set distance between children in an auto-layout frame",
   {
     nodeId: z.string().describe("The ID of the frame to modify"),
-    itemSpacing: z.number().optional().describe("Distance between children. Note: This value will be ignored if primaryAxisAlignItems is set to SPACE_BETWEEN."),
-    counterAxisSpacing: z.number().optional().describe("Distance between wrapped rows/columns. Only works when layoutWrap is set to WRAP.")
+    itemSpacing: z.number().min(0).optional().describe("Distance between children. Note: This value will be ignored if primaryAxisAlignItems is set to SPACE_BETWEEN."),
+    counterAxisSpacing: z.number().min(0).optional().describe("Distance between wrapped rows/columns. Only works when layoutWrap is set to WRAP.")
   },
   async ({ nodeId, itemSpacing, counterAxisSpacing}: any) => {
     try {
@@ -2736,7 +3185,7 @@ type CommandParams = {
   };
   export_node_as_image: {
     nodeId: string;
-    format?: "PNG" | "JPG" | "SVG" | "PDF";
+    format?: "PNG";
     scale?: number;
   };
   execute_code: {
@@ -2846,8 +3295,18 @@ function connectToFigma(port: number = 3055) {
 
   ws.on('open', () => {
     logger.info('Connected to Figma socket server');
-    // Reset channel on new connection
     currentChannel = null;
+
+    if (desiredChannel) {
+      sendCommandToFigma("join", { channel: desiredChannel })
+        .then(() => {
+          currentChannel = desiredChannel;
+          logger.info(`Rejoined desired channel: ${desiredChannel}`);
+        })
+        .catch((error) => {
+          logger.warn(`Failed to rejoin desired channel: ${error instanceof Error ? error.message : String(error)}`);
+        });
+    }
   });
 
   ws.on("message", (data: any) => {
@@ -2903,14 +3362,13 @@ function connectToFigma(port: number = 3055) {
 
       // Handle regular responses
       const myResponse = json.message;
-      logger.debug(`Received message: ${JSON.stringify(myResponse)}`);
-      logger.log('myResponse' + JSON.stringify(myResponse));
+      logger.debug(`Received message metadata: ${describePayload(myResponse)}`);
 
       // Handle response to a request
       if (
         myResponse.id &&
         pendingRequests.has(myResponse.id) &&
-        myResponse.result
+        ("result" in myResponse || "error" in myResponse)
       ) {
         const request = pendingRequests.get(myResponse.id)!;
         clearTimeout(request.timeout);
@@ -2919,7 +3377,7 @@ function connectToFigma(port: number = 3055) {
           logger.error(`Error from Figma: ${myResponse.error}`);
           request.reject(new Error(myResponse.error));
         } else {
-          if (myResponse.result) {
+          if ("result" in myResponse) {
             request.resolve(myResponse.result);
           }
         }
@@ -2927,7 +3385,7 @@ function connectToFigma(port: number = 3055) {
         pendingRequests.delete(myResponse.id);
       } else {
         // Handle broadcast messages or events
-        logger.info(`Received broadcast message: ${JSON.stringify(myResponse)}`);
+        logger.info(`Received broadcast message metadata: ${describePayload(myResponse)}`);
       }
     } catch (error) {
       logger.error(`Error parsing message: ${error instanceof Error ? error.message : String(error)}`);
@@ -2964,6 +3422,7 @@ async function joinChannel(channelName: string): Promise<void> {
   try {
     await sendCommandToFigma("join", { channel: channelName });
     currentChannel = channelName;
+    desiredChannel = channelName;
     logger.info(`Joined channel: ${channelName}`);
   } catch (error) {
     logger.error(`Failed to join channel: ${error instanceof Error ? error.message : String(error)}`);
@@ -3028,7 +3487,7 @@ function sendCommandToFigma(
 
     // Send the request
     logger.info(`Sending command to Figma: ${command}`);
-    logger.debug(`Request details: ${JSON.stringify(request)}`);
+    logger.debug(`Request metadata: ${describePayload(request)}`);
     ws.send(JSON.stringify(request));
   });
 }
