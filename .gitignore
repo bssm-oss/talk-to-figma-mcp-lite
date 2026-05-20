@@ -2,4 +2,6 @@ node_modules/
 .cursor/
 .env
 dist/
-docs/
+tmp/
+docs/*
+!docs/PRD.md
