@@ -19,9 +19,10 @@ bun run dev              # Build in watch mode
 bun socket               # Start WebSocket relay server (port 3055)
 bun run start            # Run built MCP server
 bun setup                # Full setup (install + write .cursor/mcp.json + .mcp.json)
+bun test src/talk_to_figma_mcp/lite.test.ts  # Lite facade planner tests
 ```
 
-There is no test suite or linter configured.
+There is no general lint suite configured. The Lite facade has focused Bun tests in `src/talk_to_figma_mcp/lite.test.ts`.
 
 ## Architecture
 
@@ -71,9 +72,11 @@ claude mcp add TalkToFigma -- bunx cursor-talk-to-figma-mcp@latest
 
 ## Agent Notes
 
-- Always call `join_channel` before issuing any Figma commands
-- Call `get_document_info` first to understand the design structure
-- Use `read_my_design` or `get_selection` before making modifications
-- Batch operations (`set_multiple_text_contents`, `delete_multiple_nodes`, `set_multiple_annotations`) are preferred over repeated single-node calls for performance
-- All MCP tool parameters are Zod-validated; invalid inputs return structured errors
-- The plugin and relay must both be running before any tool calls succeed
+- Prefer the Lite flow for routine work: `figma_session -> inspect_design -> preview update_nodes -> apply update_nodes -> inspect_design`.
+- See `docs/lite-tool-flow.md` for the small agent-facing surface.
+- See `docs/original-mcp-tools.md` when Lite does not cover the required low-level operation.
+- Always join a channel with `figma_session` before issuing Figma commands.
+- Batch operations (`manage_text`, `set_multiple_text_contents`, `delete_multiple_nodes`, `set_multiple_annotations`) are preferred when their safety requirements are met.
+- All MCP tool parameters are Zod-validated; invalid inputs return structured errors.
+- The plugin and relay must both be running before any tool calls succeed.
+- Preserve upstream attribution and the MIT license notice in `LICENSE`; see `docs/lineage-license.md`.
