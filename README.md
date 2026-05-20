@@ -104,8 +104,8 @@ bun socket
 1. Start the WebSocket server
 2. Install the MCP server in Cursor
 3. Open Figma and run the Cursor MCP Plugin
-4. Connect the plugin to the WebSocket server by joining a channel using `join_channel`
-5. Use Cursor to communicate with Figma using the MCP tools
+4. Connect the plugin to the WebSocket server by joining a channel using `figma_session`
+5. Use Cursor to communicate with Figma using the Lite MCP tools
 
 ## Local Development Setup
 
@@ -122,9 +122,29 @@ To develop, update your mcp config to direct to your local directory.
 }
 ```
 
-## MCP Tools
+## Lite MVP Tools
 
-The MCP server provides the following tools for interacting with Figma:
+The Lite facade is the recommended tool surface for agents. It keeps the legacy Figma commands available, but groups common workflows into safer intent-based tools with normalized `{ ok, data, error, warnings, affectedNodeIds }` responses.
+
+- `figma_session` - Check relay status, join a channel, or reconnect to the default local relay port.
+- `inspect_design` - Read document, selection, node, subtree text, or node types through one inspection workflow.
+- `create_nodes` - Create frames, rectangles, and text nodes in a single batch, optionally selecting created nodes.
+- `update_nodes` - Preview or apply geometry, style, layout, text, clone, and guarded delete patches.
+- `manage_text` - Scan text nodes or preview/apply batch text replacement.
+- `view_and_export` - Focus nodes, select nodes, or export a PNG node image from one viewport/export workflow.
+
+Recommended Lite flow:
+
+1. Start the WebSocket relay with `bun socket`.
+2. Run the Figma plugin and copy its channel.
+3. Call `figma_session({ action: "join", channel: "..." })`.
+4. Inspect with `inspect_design` before mutating.
+5. Use `update_nodes({ mode: "preview", ... })` before destructive or broad changes.
+6. Apply only after preview results look correct; delete patches require `confirmDestructive: true`.
+
+## Legacy MCP Tools
+
+The legacy MCP tools remain available for compatibility and low-level escape hatches:
 
 ### Document & Selection
 
@@ -179,8 +199,8 @@ The MCP server provides the following tools for interacting with Figma:
 
 - `move_node` - Move a node to a new position
 - `resize_node` - Resize a node with new dimensions
-- `delete_node` - Delete a node
-- `delete_multiple_nodes` - Delete multiple nodes at once efficiently
+- `delete_node` - Delete a node; requires `confirmDestructive: true`
+- `delete_multiple_nodes` - Delete multiple nodes at once efficiently; requires `confirmDestructive: true`
 - `clone_node` - Create a copy of an existing node with optional position offset
 
 ### Components & Styles
@@ -193,7 +213,7 @@ The MCP server provides the following tools for interacting with Figma:
 
 ### Export & Advanced
 
-- `export_node_as_image` - Export a node as an image (PNG, JPG, SVG, or PDF) - limited support on image currently returning base64 as text
+- `export_node_as_image` - Export a node as a PNG image returned as base64 text
 
 ### Connection Management
 
@@ -226,9 +246,9 @@ The MCP server includes several helper prompts to guide you through complex desi
 
 When working with the Figma MCP:
 
-1. Always join a channel before sending commands
-2. Get document overview using `get_document_info` first
-3. Check current selection with `get_selection` before modifications
+1. Always join a channel with `figma_session` before sending commands
+2. Get document overview using `inspect_design` first
+3. Check current selection with `inspect_design` before modifications
 4. Use appropriate creation tools based on needs:
    - `create_frame` for containers
    - `create_rectangle` for basic shapes
