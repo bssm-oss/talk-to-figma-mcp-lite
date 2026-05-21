@@ -25,6 +25,46 @@ Then run the Figma plugin and join its channel with `figma_session`.
 
 Need the plugin? Install it from the [Figma community page](https://www.figma.com/community/plugin/1485687494525374295/cursor-talk-to-figma-mcp-plugin) or link `src/cursor_mcp_plugin/manifest.json` locally.
 
+## Local MCP Setup
+
+For local repo testing, point your MCP client at the TypeScript server:
+
+```json
+{
+  "mcpServers": {
+    "TalkToFigma": {
+      "command": "bun",
+      "args": ["/path-to-repo/src/talk_to_figma_mcp/server.ts"]
+    }
+  }
+}
+```
+
+For package-style usage, use the published command:
+
+```json
+{
+  "mcpServers": {
+    "TalkToFigma": {
+      "command": "bunx",
+      "args": ["cursor-talk-to-figma-mcp@latest"]
+    }
+  }
+}
+```
+
+Runtime checklist:
+
+1. Start the relay with `bun socket` on port `3055`.
+2. Open Figma and run the Talk to Figma plugin.
+3. Copy the plugin channel.
+4. Call `figma_session({ "action": "join", "channel": "..." })`.
+5. Use the Lite flow below.
+
+Local `.mcp.json` files are machine-specific. Keep local path changes uncommitted unless you intentionally want to share that config.
+
+Full setup notes live in [Setup and Local Development](./docs/setup-local-dev.md).
+
 ## Lite Flow
 
 ```text
