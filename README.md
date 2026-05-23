@@ -1,23 +1,49 @@
 # Talk to Figma MCP Lite
 
-A thinner default workflow for using Figma through MCP.
+A local-first, agent-friendly facade for the unofficial Talk to Figma MCP stack.
 
-Lite keeps the original Talk to Figma MCP server, relay, plugin, prompts, and low-level tools intact. It adds a small intent-based facade so agents can inspect, create, update, and export with less context overhead.
+> Project status: frozen prototype / local fallback. This repository is kept as a polished open-source reference for local Figma MCP workflows. It is not intended to compete with the official Figma MCP server, which now provides the strongest path for broad Figma read/write capability.
+
+Lite keeps the original Talk to Figma MCP server, relay, plugin, prompts, and low-level tools intact. It adds a smaller intent-based facade so agents can inspect, create, update, and export with less context overhead and a safer preview-first workflow.
 
 https://github.com/user-attachments/assets/129a14d2-ed73-470f-9a4c-2240b2a4885c
 
+## Why This Exists
+
+The original Talk to Figma MCP exposes a large low-level tool surface. That is powerful, but agents can waste context choosing between similar tools or mutate Figma without enough inspection.
+
+Lite explores a narrower workflow:
+
+```text
+figma_session -> inspect_design -> preview update_nodes -> apply update_nodes -> inspect_design
+```
+
+Use this repo when you want:
+
+- a local Figma plugin + WebSocket relay workflow
+- a small agent-facing tool surface
+- normalized responses from common Figma actions
+- preview-first updates and explicit destructive-operation confirmation
+- a reference implementation for building safer Figma agent adapters
+
+Prefer the official Figma MCP when you need first-class remote access, variables, components, Code Connect, or production-grade Figma agent workflows.
+
 ## Start Here
 
-- New user: [Setup and Local Development](./docs/setup-local-dev.md)
+- Current project status: [Project Status](./docs/project-status.md)
+- New user setup: [Setup and Local Development](./docs/setup-local-dev.md)
 - Agent workflow: [Lite Tool Flow](./docs/lite-tool-flow.md)
-- Full tool surface: [Original MCP Tools](./docs/original-mcp-tools.md)
+- Full original tool surface: [Original MCP Tools](./docs/original-mcp-tools.md)
 - Attribution and redistribution: [Lineage and License](./docs/lineage-license.md)
-- Product plan: [Lite MVP PRD](./docs/PRD.md)
+- Product plan and historical rationale: [Lite MVP PRD](./docs/PRD.md)
+- Contributing guide: [CONTRIBUTING](./CONTRIBUTING.md)
+- Security policy: [SECURITY](./SECURITY.md)
+- Support policy: [SUPPORT](./SUPPORT.md)
 
 ## Quick Start
 
 ```bash
-bun setup
+bun install
 bun socket
 ```
 
@@ -40,7 +66,7 @@ For local repo testing, point your MCP client at the TypeScript server:
 }
 ```
 
-For package-style usage, use the published command:
+For package-style usage, use the upstream published command:
 
 ```json
 {
@@ -65,11 +91,16 @@ Local `.mcp.json` files are machine-specific. Keep local path changes uncommitte
 
 Full setup notes live in [Setup and Local Development](./docs/setup-local-dev.md).
 
-## Lite Flow
+## Lite Tools
 
-```text
-figma_session -> inspect_design -> preview update_nodes -> apply update_nodes -> inspect_design
-```
+| Tool | Purpose |
+| --- | --- |
+| `figma_session` | Join, reconnect, or inspect relay/channel state. |
+| `inspect_design` | Read the document, selection, nodes, text, or node types. |
+| `create_nodes` | Batch-create frames, rectangles, and text. |
+| `update_nodes` | Preview or apply geometry, style, layout, text, clone, and guarded delete patches. |
+| `manage_text` | Scan text or preview/apply batch text replacement. |
+| `view_and_export` | Focus, select, or export PNG node images. |
 
 Use [Lite Tool Flow](./docs/lite-tool-flow.md) for routine agent work. Drop to [Original MCP Tools](./docs/original-mcp-tools.md) when you need exact low-level control.
 
@@ -82,6 +113,29 @@ Claude Code / Cursor <-> MCP Server <-> WebSocket Relay <-> Figma Plugin
 - `src/talk_to_figma_mcp/` - MCP server and Lite facade
 - `src/cursor_mcp_plugin/` - Figma plugin
 - `src/socket.ts` - WebSocket relay
+- `docs/` - setup, tool-flow, status, and lineage docs
+
+## Development
+
+```bash
+bun install
+bun run build
+bun test src/talk_to_figma_mcp/lite.test.ts
+```
+
+There is no general lint suite configured. The focused Lite facade tests live in `src/talk_to_figma_mcp/lite.test.ts`.
+
+## Maintenance Scope
+
+This repository is complete as a prototype and local fallback. Future work should generally be limited to:
+
+- documentation fixes
+- security fixes
+- compatibility fixes for local development
+- small Lite facade bug fixes
+- attribution/license corrections
+
+New product exploration around `DESIGN.md`-driven Figma and web sync should happen in a separate project rather than expanding this repo into another official Figma MCP competitor.
 
 ## Community Notes
 
@@ -92,16 +146,6 @@ Useful original demos:
 - [Quick video tutorial](https://www.linkedin.com/posts/sonnylazuardi_just-wanted-to-share-my-latest-experiment-activity-7307821553654657024-yrh8)
 - [Bulk text replacement demo](https://www.youtube.com/watch?v=j05gGT3xfCs), contributed by [@dusskapark](https://github.com/dusskapark)
 - [Instance override propagation demo](https://youtu.be/uvuT8LByroI), also contributed by [@dusskapark](https://github.com/dusskapark)
-
-## Development
-
-```bash
-bun install
-bun run build
-bun test src/talk_to_figma_mcp/lite.test.ts
-```
-
-More commands and local MCP config examples are in [Setup and Local Development](./docs/setup-local-dev.md).
 
 ## License
 

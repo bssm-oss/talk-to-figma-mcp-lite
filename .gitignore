@@ -9,3 +9,4 @@ docs/*
 !docs/original-mcp-tools.md
 !docs/setup-local-dev.md
 !docs/lineage-license.md
+!docs/project-status.md
